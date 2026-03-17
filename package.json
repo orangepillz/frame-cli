@@ -1,0 +1,26 @@
+{
+  "name": "samsung-frame-tv-cli",
+  "version": "0.1.0",
+  "description": "CLI for controlling a Samsung Frame TV over the local network",
+  "type": "module",
+  "bin": {
+    "tv": "./bin/samsung-tv.js",
+    "samsung-tv": "./bin/samsung-tv.js"
+  },
+  "scripts": {
+    "start": "node ./bin/samsung-tv.js",
+    "discover": "node ./bin/samsung-tv.js discover"
+  },
+  "keywords": [
+    "samsung",
+    "tv",
+    "frame",
+    "cli",
+    "upnp",
+    "websocket"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.1"
+  }
+}
