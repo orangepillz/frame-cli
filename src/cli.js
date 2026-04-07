@@ -1,8 +1,10 @@
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   clamp,
   connectRemoteSession,
   discoverSamsungTvs,
+  getAppStatus,
   getDefaultConfigPath,
   getInstalledApps,
   getMute,
@@ -463,23 +465,34 @@ async function handleApp(args, options, config) {
     let apps;
     try {
       apps = await getInstalledApps(info.host);
-    } catch (error) {
-      // Fallback: if the /applications endpoint isn't available, show known apps
-      if (options.json) {
-        const knownList = Object.entries(WELL_KNOWN_APPS)
-          .filter(([key]) => !/[ +]/.test(key))
-          .map(([name, appId]) => ({ name, appId }));
-        console.log(JSON.stringify(knownList, null, 2));
-      } else {
-        console.log("Could not fetch installed apps from TV. Known app shortcuts:\n");
-        const seen = new Set();
-        for (const [name, appId] of Object.entries(WELL_KNOWN_APPS)) {
-          if (/[ +]/.test(name) || seen.has(appId)) continue;
-          seen.add(appId);
-          console.log(`  ${name.padEnd(14)} ${appId}`);
-        }
-      }
-      return;
+    } catch {
+      // Bulk endpoint not available — probe known apps individually
+      const seen = new Set();
+      const entries = Object.entries(WELL_KNOWN_APPS).filter(([name, id]) => {
+        if (/[ +]/.test(name) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+
+      const probed = await Promise.all(
+        entries.map(async ([name, appId]) => {
+          try {
+            const status = await getAppStatus(info.host, appId);
+            return {
+              appId: status.id ?? appId,
+              name: status.name ?? name,
+              running: status.running ?? false,
+              visible: status.visible ?? false,
+              version: status.version ?? null,
+              installed: true
+            };
+          } catch {
+            return { appId, name, installed: false };
+          }
+        })
+      );
+
+      apps = probed.filter((a) => a.installed);
     }
 
     if (options.json) {
@@ -491,7 +504,8 @@ async function handleApp(args, options, config) {
       }
       for (const app of apps) {
         const status = app.running ? " (running)" : "";
-        console.log(`${(app.name ?? "?").padEnd(30)} ${app.appId}${status}`);
+        const ver = app.version ? ` v${app.version}` : "";
+        console.log(`${(app.name ?? "?").padEnd(22)} ${app.appId}${ver}${status}`);
       }
     }
     return;
@@ -525,17 +539,44 @@ async function handleApp(args, options, config) {
     );
   }
 
-  const remote = await ensureRemoteCredentials(options, config);
-  await launchApp(remote.info.host, appId, {
-    clientName: remote.config.clientName,
-    token: remote.config.token
-  });
+  const { info } = await discoverOrResolveDevice(options, config, { requireInfo: true });
+
+  // If the TV is in art/ambient mode, wake it first with KEY_POWER
+  const isArtMode = info.powerState === "on";
+  let wokenFromArt = false;
+  try {
+    const appStatus = await getAppStatus(info.host, appId);
+    // If the app isn't running but TV says "on", it might be in art mode
+    // We detect art mode by checking if the TV responds to info but no app is active
+    if (isArtMode && !appStatus.running && !appStatus.visible) {
+      // Try launching directly first — the REST POST often wakes from art mode
+    }
+  } catch {
+    // App status check failed, proceed anyway
+  }
+
+  const result = await launchApp(info.host, appId);
+
+  if (!result.ok) {
+    // If direct launch failed, try waking from art mode first
+    const remote = await ensureRemoteCredentials(options, config);
+    await sendRemoteKey(remote.info.host, "KEY_POWER", {
+      clientName: remote.config.clientName,
+      token: remote.config.token
+    });
+    await delay(3000);
+    const retryResult = await launchApp(info.host, appId);
+    wokenFromArt = true;
+    if (!retryResult.ok) {
+      throw new Error(`Failed to launch app ${appId}`);
+    }
+  }
 
   // Find the friendly name for display
   const friendlyName = Object.entries(WELL_KNOWN_APPS).find(([, id]) => id === appId)?.[0] ?? appId;
 
   if (options.json) {
-    console.log(JSON.stringify({ launched: true, appId, name: friendlyName }));
+    console.log(JSON.stringify({ launched: true, appId, name: friendlyName, wokenFromArt }));
   } else {
     console.log(`Launched ${friendlyName} (${appId})`);
   }

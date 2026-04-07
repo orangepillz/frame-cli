@@ -622,28 +622,23 @@ export async function getInstalledApps(host, timeoutMs = DEFAULT_TIMEOUT_MS) {
 }
 
 export async function launchApp(host, appId, options = {}) {
-  const session = await connectRemoteSession(host, options);
+  // Use the REST API to launch — more reliable than WebSocket ed.apps.launch
+  const response = await fetchWithTimeout(
+    `http://${host}:8001/api/v2/applications/${encodeURIComponent(appId)}`,
+    { method: "POST" },
+    5000
+  );
+  const result = await response.text();
+  return { appId, ok: result.trim() === "true" };
+}
 
-  try {
-    await sendRemotePayload(session.ws, {
-      method: "ms.channel.emit",
-      params: {
-        event: "ed.apps.launch",
-        to: "host",
-        data: {
-          appId,
-          action_type: options.actionType ?? "DEEP_LINK",
-          metaTag: options.metaTag ?? ""
-        }
-      }
-    });
-    // Give the TV a moment to process the launch
-    await delay(500);
-  } finally {
-    session.ws.close();
-  }
-
-  return { appId };
+export async function getAppStatus(host, appId, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(
+    `http://${host}:8001/api/v2/applications/${encodeURIComponent(appId)}`,
+    {},
+    timeoutMs
+  );
+  return response.json();
 }
 
 export function mergeConfigWithInfo(config, info, extras = {}) {
