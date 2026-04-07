@@ -4,11 +4,13 @@ import {
   connectRemoteSession,
   discoverSamsungTvs,
   getDefaultConfigPath,
+  getInstalledApps,
   getMute,
   getPowerState,
   getTvInfo,
   getVolume,
   holdRemoteKey,
+  launchApp,
   mergeConfigWithInfo,
   readConfig,
   sendRemoteKey,
@@ -30,12 +32,49 @@ const INPUT_KEYS = {
   art: "KEY_AMBIENT"
 };
 
+// Well-known Samsung TV app IDs for popular streaming services
+const WELL_KNOWN_APPS = {
+  netflix: "3201907018807",
+  youtube: "111299001912",
+  hulu: "3201601007625",
+  disney: "3201901017640",
+  "disney+": "3201901017640",
+  disneyplus: "3201901017640",
+  hbo: "3201601007230",
+  "hbo max": "3201601007230",
+  max: "3201601007230",
+  prime: "3201910019365",
+  "prime video": "3201910019365",
+  "amazon prime": "3201910019365",
+  amazon: "3201910019365",
+  peacock: "3201909019758",
+  paramount: "3201910019354",
+  "paramount+": "3201910019354",
+  paramountplus: "3201910019354",
+  apple: "3201807016597",
+  "apple tv": "3201807016597",
+  "apple tv+": "3201807016597",
+  appletv: "3201807016597",
+  spotify: "3201606009684",
+  plex: "3201512006963",
+  tubi: "3201504001965",
+  crunchyroll: "3201908019286",
+  twitch: "3201805016608",
+  pluto: "3201812011795",
+  "pluto tv": "3201812011795",
+  vudu: "111012010001",
+  browser: "org.tizen.browser",
+  web: "org.tizen.browser"
+};
+
 function getCommandName() {
   return path.basename(process.argv[1] ?? "tv") || "tv";
 }
 
 function printHelp() {
   const commandName = getCommandName();
+
+  const appNames = [...new Set(Object.keys(WELL_KNOWN_APPS).filter((k) => !/[ +]/.test(k) && k.length <= 12))].slice(0, 8);
 
   console.log(`Samsung TV CLI
 
@@ -48,6 +87,8 @@ Usage:
   ${commandName} volume <get|set|up|down> [value]
   ${commandName} mute <on|off|toggle|status>
   ${commandName} input <${Object.keys(INPUT_KEYS).join("|")}>
+  ${commandName} app list [--json]
+  ${commandName} app <name|appId> [--json]
   ${commandName} key <KEY_NAME>
   ${commandName} help
 
@@ -57,6 +98,9 @@ Options:
   --client-name <name> Override the Samsung websocket client name
   --json               Emit JSON where supported
 
+Known Apps:
+  ${appNames.join(", ")}, ...
+
 Examples:
   ${commandName} discover
   ${commandName} info
@@ -64,6 +108,9 @@ Examples:
   ${commandName} art
   ${commandName} volume set 10
   ${commandName} input hdmi1
+  ${commandName} app netflix
+  ${commandName} app hulu
+  ${commandName} app list
 `);
 }
 
@@ -403,6 +450,97 @@ async function handleInput(source, options, config) {
   console.log(`Sent ${source}`);
 }
 
+async function handleApp(args, options, config) {
+  const subcommand = args[0];
+
+  if (!subcommand) {
+    throw new Error("app requires a subcommand: list, or an app name/id to launch");
+  }
+
+  if (subcommand === "list") {
+    const { info } = await discoverOrResolveDevice(options, config, { requireInfo: false });
+
+    let apps;
+    try {
+      apps = await getInstalledApps(info.host);
+    } catch (error) {
+      // Fallback: if the /applications endpoint isn't available, show known apps
+      if (options.json) {
+        const knownList = Object.entries(WELL_KNOWN_APPS)
+          .filter(([key]) => !/[ +]/.test(key))
+          .map(([name, appId]) => ({ name, appId }));
+        console.log(JSON.stringify(knownList, null, 2));
+      } else {
+        console.log("Could not fetch installed apps from TV. Known app shortcuts:\n");
+        const seen = new Set();
+        for (const [name, appId] of Object.entries(WELL_KNOWN_APPS)) {
+          if (/[ +]/.test(name) || seen.has(appId)) continue;
+          seen.add(appId);
+          console.log(`  ${name.padEnd(14)} ${appId}`);
+        }
+      }
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(apps, null, 2));
+    } else {
+      if (apps.length === 0) {
+        console.log("No apps found");
+        return;
+      }
+      for (const app of apps) {
+        const status = app.running ? " (running)" : "";
+        console.log(`${(app.name ?? "?").padEnd(30)} ${app.appId}${status}`);
+      }
+    }
+    return;
+  }
+
+  // Resolve the app name — join all args to handle multi-word names like "apple tv"
+  const appQuery = args.join(" ").toLowerCase();
+  let appId = WELL_KNOWN_APPS[appQuery];
+
+  if (!appId) {
+    // Check if it looks like a raw app ID (numeric or dot-separated)
+    if (/^[\d.]+$/.test(args[0]) || /^[a-z]+\.[a-z]+/i.test(args[0])) {
+      appId = args[0];
+    }
+  }
+
+  if (!appId) {
+    // Fuzzy match: check if query is a substring of any known app name
+    const match = Object.entries(WELL_KNOWN_APPS).find(([name]) =>
+      name.includes(appQuery) || appQuery.includes(name)
+    );
+    if (match) {
+      appId = match[1];
+    }
+  }
+
+  if (!appId) {
+    const knownNames = [...new Set(Object.keys(WELL_KNOWN_APPS).filter((k) => !/[ +]/.test(k)))];
+    throw new Error(
+      `Unknown app: "${args.join(" ")}". Use a known name (${knownNames.join(", ")}), or pass a raw app ID.`
+    );
+  }
+
+  const remote = await ensureRemoteCredentials(options, config);
+  await launchApp(remote.info.host, appId, {
+    clientName: remote.config.clientName,
+    token: remote.config.token
+  });
+
+  // Find the friendly name for display
+  const friendlyName = Object.entries(WELL_KNOWN_APPS).find(([, id]) => id === appId)?.[0] ?? appId;
+
+  if (options.json) {
+    console.log(JSON.stringify({ launched: true, appId, name: friendlyName }));
+  } else {
+    console.log(`Launched ${friendlyName} (${appId})`);
+  }
+}
+
 async function handleKey(key, options, config) {
   const remote = await ensureRemoteCredentials(options, config);
   await sendRemoteKey(remote.info.host, key, {
@@ -465,6 +603,11 @@ export async function runCli(argv) {
 
   if (command === "input") {
     await handleInput(rest[0], options, config);
+    return;
+  }
+
+  if (command === "app") {
+    await handleApp(rest, options, config);
     return;
   }
 

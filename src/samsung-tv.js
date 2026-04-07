@@ -609,6 +609,43 @@ export async function sendWakeOnLan(mac, hostHint) {
   await delay(200);
 }
 
+export async function getInstalledApps(host, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(`http://${host}:8001/api/v2/applications`, {}, timeoutMs);
+  const json = await response.json();
+  return (json.applications ?? json ?? []).map((app) => ({
+    appId: app.appId,
+    name: app.name,
+    running: app.running ?? false,
+    visible: app.visible ?? false,
+    type: app.app_type ?? null
+  }));
+}
+
+export async function launchApp(host, appId, options = {}) {
+  const session = await connectRemoteSession(host, options);
+
+  try {
+    await sendRemotePayload(session.ws, {
+      method: "ms.channel.emit",
+      params: {
+        event: "ed.apps.launch",
+        to: "host",
+        data: {
+          appId,
+          action_type: options.actionType ?? "DEEP_LINK",
+          metaTag: options.metaTag ?? ""
+        }
+      }
+    });
+    // Give the TV a moment to process the launch
+    await delay(500);
+  } finally {
+    session.ws.close();
+  }
+
+  return { appId };
+}
+
 export function mergeConfigWithInfo(config, info, extras = {}) {
   return {
     ...config,
